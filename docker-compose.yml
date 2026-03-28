@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  sedori-bot:
+    build: .
+    container_name: sedori-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+    command: []   # デフォルト: スケジューラモード (毎朝8:00)
+    # 即時実行: docker-compose run sedori-bot --run-now

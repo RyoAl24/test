@@ -1,0 +1,15 @@
+requests==2.31.0
+beautifulsoup4==4.12.3
+selenium==4.18.1
+playwright==1.42.0
+aiohttp==3.9.3
+python-dotenv==1.0.1
+schedule==1.2.1
+slack-sdk==3.27.1
+boto3==1.34.51
+sp-api==0.14.0
+lxml==5.1.0
+fake-useragent==1.4.0
+tenacity==8.2.3
+loguru==0.7.2
+pydantic==2.6.3
