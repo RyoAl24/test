@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+# Chrome + ChromeDriver に必要なパッケージ
+RUN apt-get update && apt-get install -y \
+    wget curl gnupg unzip \
+    fonts-noto-cjk \
+    libnss3 libatk-bridge2.0-0 libcups2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 \
+    && wget -qO - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+       > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements_selenium.txt .
+RUN pip install --no-cache-dir -r requirements_selenium.txt
+
+COPY browser.py mercari_selenium.py rakuten_selenium.py \
+     slack_report.py selenium_config.py run.py ./
+
+RUN mkdir -p logs
+
+# デフォルト: スケジューラモード（毎朝 DAILY_RUN_TIME に起動）
+ENTRYPOINT ["python", "run.py"]
+CMD []
