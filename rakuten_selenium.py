@@ -1,6 +1,6 @@
 """
-楽天市場 価格スクレイパー（requests + BeautifulSoup）
-API キー不要。楽天検索ページから最安値を直接取得する。
+楽天市場 価格スクレイパー（Selenium + BeautifulSoup）
+API キー不要。楽天検索ページをブラウザ経由で取得して最安値を抽出する。
 """
 
 import re
@@ -10,12 +10,15 @@ from urllib.parse import quote
 from dataclasses import dataclass
 from typing import Optional
 
-import requests
 from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from tenacity import retry, stop_after_attempt, wait_exponential
 from loguru import logger
 
 import selenium_config as cfg
+from browser import build_driver
 from mercari_selenium import SoldItem
 
 
@@ -37,51 +40,67 @@ class ProfitResult:
 
 # ── 楽天スクレイパー ──────────────────────────────────────────────────────────
 
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-]
-
-
 class RakutenScraper:
-    SEARCH_URL = "https://search.rakuten.co.jp/search/mall/{keyword}/?s=2"  # s=2: 価格昇順
+    # s=2: 価格昇順。日本語キーワードは quote() で %XX エンコードする
+    SEARCH_URL = "https://search.rakuten.co.jp/search/mall/{keyword}/?s=2"
+
+    # 価格テキストから数字だけ抜き出す（¥・,・円・全角数字 に対応）
+    _PRICE_RE = re.compile(r"[\d,．]+")
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-            }
-        )
+        self.driver = build_driver()
+        self.wait   = WebDriverWait(self.driver, cfg.PAGE_LOAD_TIMEOUT)
 
-    def _get_headers(self) -> dict:
-        return {"User-Agent": random.choice(_USER_AGENTS)}
+    # ── ページ取得 ────────────────────────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-    def _fetch_html(self, keyword: str) -> str:
-        url = self.SEARCH_URL.format(keyword=quote(keyword))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=3, max=12))
+    def _fetch_page(self, keyword: str) -> BeautifulSoup:
+        """
+        Selenium でページを開き、商品リストが描画されるまで待機して
+        BeautifulSoup オブジェクトを返す。
+        """
+        # 日本語キーワードを URL エンコード（スペースは + ではなく %20）
+        url = self.SEARCH_URL.format(keyword=quote(keyword, safe=""))
         logger.debug(f"楽天 GET {url}")
-        resp = self.session.get(url, headers=self._get_headers(), timeout=15)
-        resp.raise_for_status()
-        return resp.text
+        self.driver.get(url)
 
-    def _parse_cheapest(self, html: str) -> Optional[dict]:
-        """
-        楽天検索結果ページから最安値商品の情報を取得。
-        複数のセレクター候補をフォールバック付きで試みる。
-        """
-        soup = BeautifulSoup(html, "lxml")
+        # 商品リストが 1 件以上出るまで最大 10 秒待つ
+        # 複数のセレクターを OR 条件でまとめて待機
+        try:
+            self.wait.until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR,
+                     "div[data-rat-itemid], div.searchresultitems, li.item")
+                )
+            )
+        except Exception:
+            # タイムアウトしてもパースは試みる
+            pass
 
-        # ── 商品カード候補 ──
+        time.sleep(random.uniform(1.0, 2.5))
+        return BeautifulSoup(self.driver.page_source, "lxml")
+
+    # ── HTML パース ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_price(text: str) -> int:
+        """
+        価格文字列 → int 変換。
+        例: "¥1,234" → 1234 / "1,234円" → 1234 / "1234" → 1234
+        """
+        digits = re.sub(r"[^\d]", "", text)
+        return int(digits) if digits else 0
+
+    def _parse_cards(self, soup: BeautifulSoup) -> list[dict]:
+        """
+        楽天検索結果ページから全商品カードをパースして返す。
+        楽天は定期的にレイアウトを変更するため、セレクターを優先順に試みる。
+        """
+        # ── カードコンテナ候補（優先順） ──────────────────────────────────
         card_selectors = [
+            "div[data-rat-itemid]",             # 2023〜 新レイアウト
             "div.searchresultitems div.item",   # 旧レイアウト
-            "div[data-rat-itemid]",              # 新レイアウト
-            "li.item",
+            "li.item",                          # 一部カテゴリ
             "div.item-details",
         ]
 
@@ -89,90 +108,106 @@ class RakutenScraper:
         for sel in card_selectors:
             cards = soup.select(sel)
             if cards:
+                logger.debug(f"楽天カード '{sel}' → {len(cards)} 件")
                 break
 
-        if not cards:
-            # フォールバック: 価格テキストを直接探す
-            return self._parse_fallback(soup)
-
         items = []
-        for card in cards[:20]:  # 先頭 20件だけ見る
+        for card in cards[:30]:   # 先頭 30 件を見る
             try:
-                # 商品名
-                name = ""
-                for name_sel in [".title", ".item-name", "h2", "a.title"]:
-                    el = card.select_one(name_sel)
-                    if el:
-                        name = el.get_text(strip=True)
-                        break
-
-                # 価格
-                price = 0
-                for price_sel in [
-                    ".price span",
-                    ".important",
-                    ".price",
-                    "span[class*='price']",
-                ]:
-                    el = card.select_one(price_sel)
-                    if el:
-                        raw = el.get_text(strip=True)
-                        digits = re.sub(r"[^\d]", "", raw)
-                        if digits:
-                            price = int(digits)
-                            break
-
-                # 店名
-                shop = ""
-                for shop_sel in [".shop-name", ".shopname", ".by-text a", "a[href*='shop']"]:
-                    el = card.select_one(shop_sel)
-                    if el:
-                        shop = el.get_text(strip=True)
-                        break
-
-                # URL
-                url = ""
-                link = card.select_one("a.title, a[href*='item.rakuten']")
-                if link:
-                    url = link.get("href", "")
-
-                # 画像
-                image_url = ""
-                img = card.select_one("img")
-                if img:
-                    image_url = img.get("src") or img.get("data-src") or ""
-
-                if name and price > 0:
-                    items.append(
-                        {
-                            "name":      name,
-                            "price":     price,
-                            "shop":      shop,
-                            "url":       url,
-                            "image_url": image_url,
-                        }
-                    )
+                item = self._parse_single_card(card)
+                if item:
+                    items.append(item)
             except Exception:
                 continue
 
-        if not items:
+        return items
+
+    def _parse_single_card(self, card) -> Optional[dict]:
+        """1枚のカードから name / price / shop / url / image_url を抽出する。"""
+
+        # ── 商品名 ────────────────────────────────────────────────────────
+        name = ""
+        for sel in [
+            "a.content--2O6Gt",        # 新レイアウト
+            ".title a",                # 旧レイアウト
+            "h2 a",
+            "a[data-rat-itemtitle]",
+            ".item-name a",
+        ]:
+            el = card.select_one(sel)
+            if el:
+                name = el.get_text(strip=True)
+                break
+
+        # ── 価格 ──────────────────────────────────────────────────────────
+        price = 0
+        for sel in [
+            "span.price--OGXaL",       # 新レイアウト（税込み価格）
+            ".important",              # 旧レイアウト
+            "span.price",              # 元のコードが参照していた class
+            "span[class*='price']",
+            ".price",
+        ]:
+            el = card.select_one(sel)
+            if el:
+                price = self._extract_price(el.get_text(strip=True))
+                if price > 0:
+                    break
+
+        # price == 0 はスキップ
+        if price == 0:
             return None
 
-        # 最安値を返す
-        return min(items, key=lambda x: x["price"])
+        # ── 店名 ──────────────────────────────────────────────────────────
+        shop = ""
+        for sel in [
+            "a.shopName--2l95m",       # 新レイアウト
+            ".shop-name a",
+            ".shopname a",
+            "a[href*='shop.rakuten']",
+        ]:
+            el = card.select_one(sel)
+            if el:
+                shop = el.get_text(strip=True)
+                break
 
-    def _parse_fallback(self, soup: BeautifulSoup) -> Optional[dict]:
+        # ── 商品ページ URL ────────────────────────────────────────────────
+        url = ""
+        for sel in [
+            "a.content--2O6Gt",
+            "a[data-rat-itemtitle]",
+            ".title a",
+            "h2 a",
+        ]:
+            el = card.select_one(sel)
+            if el and el.get("href", "").startswith("http"):
+                url = el["href"]
+                break
+
+        # ── サムネイル ────────────────────────────────────────────────────
+        image_url = ""
+        img = card.select_one("img")
+        if img:
+            image_url = img.get("src") or img.get("data-src") or ""
+
+        if not name:
+            return None
+
+        return {
+            "name":      name,
+            "price":     price,
+            "shop":      shop,
+            "url":       url,
+            "image_url": image_url,
+        }
+
+    def _fallback_parse(self, soup: BeautifulSoup) -> Optional[dict]:
         """
-        構造が変わった場合のフォールバックパース。
-        ページ内で最初に見つかる価格テキストと近傍リンクを返す。
+        カードが一切見つからない場合の最終手段。
+        ページ内の "¥X,XXX" パターンから最初の有効価格を拾う。
         """
-        # "¥X,XXX" のパターンを探す
-        price_tags = soup.find_all(string=re.compile(r"[¥￥]\s*[\d,]+"))
-        for tag in price_tags:
-            raw = re.sub(r"[^\d]", "", tag)
-            if not raw:
-                continue
-            price = int(raw)
+        for tag in soup.find_all(string=re.compile(r"[¥￥]\s*[\d,]+")):
+            price = self._extract_price(tag)
             if price < 100:
                 continue
             parent = tag.parent
@@ -186,19 +221,38 @@ class RakutenScraper:
             }
         return None
 
+    # ── 公開メソッド ─────────────────────────────────────────────────────────
+
     def get_cheapest(self, keyword: str) -> Optional[dict]:
-        """キーワードで楽天を検索して最安値商品情報を返す。"""
+        """
+        キーワードで楽天を検索して最安値商品情報を返す。
+        見つからない場合は None を返す。
+        """
         try:
-            html = self._fetch_html(keyword)
-            result = self._parse_cheapest(html)
+            soup  = self._fetch_page(keyword)
+            items = self._parse_cards(soup)
+
+            if not items:
+                result = self._fallback_parse(soup)
+            else:
+                result = min(items, key=lambda x: x["price"])
+
             if result:
                 logger.debug(
-                    f"楽天最安値: '{keyword[:20]}' → ¥{result['price']:,} ({result['shop'][:20]})"
+                    f"楽天最安値: '{keyword[:20]}' "
+                    f"→ ¥{result['price']:,}  ({result['shop'][:20] or '不明'})"
                 )
+            else:
+                logger.debug(f"楽天: '{keyword[:20]}' → 結果なし")
+
             return result
+
         except Exception as e:
             logger.warning(f"楽天スクレイピング失敗 '{keyword[:20]}': {e}")
             return None
+
+    def close(self):
+        self.driver.quit()
 
 
 # ── 利益計算 ─────────────────────────────────────────────────────────────────
@@ -208,34 +262,34 @@ class ProfitCalculator:
         self.scraper = RakutenScraper()
 
     def _calc(
-        self, mercari_price: int, rakuten_price: int
-    ) -> tuple[int, int, float]:
+        self, sell_price: int, buy_price: int
+    ) -> tuple[int, float]:
         """
-        Amazon 出品価格 = 楽天仕入れ値 × PRICE_MULTIPLIER_MIN〜MAX の中間値
-        利益 = Amazon 出品価格 - 楽天仕入れ値 - Amazon 手数料 - FBA 手数料
+        楽天仕入れ → Mercari 出品モデルの利益計算。
+
+          mercari_fee = sell_price × MERCARI_FEE_RATE   (10%)
+          profit      = sell_price - mercari_fee - SHIPPING_FEE - buy_price
+          profit_rate = profit / sell_price              (0.0〜1.0)
         """
-        mid_multiplier = (cfg.PRICE_MULTIPLIER_MIN + cfg.PRICE_MULTIPLIER_MAX) / 2.0
-        amazon_price   = int(rakuten_price * mid_multiplier)
-
-        amazon_fee     = int(amazon_price * cfg.AMAZON_FEE_RATE)
-        profit         = amazon_price - rakuten_price - amazon_fee - cfg.AMAZON_FBA_FEE
-        profit_rate    = profit / amazon_price if amazon_price > 0 else 0.0
-
-        return amazon_price, profit, profit_rate
+        mercari_fee = int(sell_price * cfg.MERCARI_FEE_RATE)
+        profit      = sell_price - mercari_fee - cfg.SHIPPING_FEE - buy_price
+        profit_rate = profit / sell_price if sell_price > 0 else 0.0
+        return profit, profit_rate
 
     def evaluate(self, item: SoldItem) -> Optional[ProfitResult]:
         """
-        メルカリ売れ筋商品を楽天で検索し、利益が閾値を超えたら ProfitResult を返す。
+        メルカリ売れ筋商品を楽天で検索し、利益率が閾値を超えたら ProfitResult を返す。
+        出品価格はメルカリの実績売価をそのまま使う。
         """
         rakuten = self.scraper.get_cheapest(item.name[:50])
         if not rakuten or rakuten["price"] == 0:
             return None
 
-        amazon_price, profit, profit_rate = self._calc(item.price, rakuten["price"])
+        profit, profit_rate = self._calc(item.price, rakuten["price"])
 
         logger.debug(
             f"{item.name[:25]} | 仕入¥{rakuten['price']:,} → "
-            f"出品¥{amazon_price:,} | 利益¥{profit:,} ({profit_rate:.1%})"
+            f"出品¥{item.price:,} | 利益¥{profit:,} ({profit_rate:.1%})"
         )
 
         if profit_rate < cfg.MIN_PROFIT_RATE:
@@ -248,7 +302,7 @@ class ProfitCalculator:
             rakuten_shop      = rakuten["shop"],
             rakuten_url       = rakuten["url"],
             rakuten_image_url = rakuten["image_url"],
-            amazon_sell_price = amazon_price,
+            amazon_sell_price = item.price,   # Mercari 実績売価 = 出品予定価格
             profit            = profit,
             profit_rate       = profit_rate,
         )

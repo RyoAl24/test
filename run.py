@@ -2,9 +2,13 @@
 セドリ自動化ツール - Selenium 版 メインエントリーポイント
 
 使い方:
-  python run.py              # スケジューラ起動（毎朝 DAILY_RUN_TIME に実行）
+  python run.py              # スケジューラ起動（毎朝 DAILY_RUN_TIME=06:00 に実行）
   python run.py --now        # 即時実行
   python run.py --now --dry  # ドライラン（Slack 未送信、ターミナル出力のみ）
+
+cron での自動実行（毎朝 6時）:
+  crontab -e  で以下を追記:
+  0 6 * * * cd /path/to/project && /usr/bin/python3 /path/to/project/run.py --now >> /path/to/project/logs/cron.log 2>&1
 """
 
 import os

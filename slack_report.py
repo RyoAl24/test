@@ -17,7 +17,7 @@ from rakuten_selenium import ProfitResult
 class SlackReporter:
     def __init__(self):
         self.client  = WebClient(token=cfg.SLACK_BOT_TOKEN)
-        self.channel = cfg.SLACK_CHANNEL_ID
+        self.channel = cfg.SLACK_CHANNEL   # "sedori" / "#sedori" / "C0XXXXX" すべて可
 
     # ── ブロック生成ヘルパー ──────────────────────────────────────────────────
 
@@ -136,7 +136,7 @@ class SlackReporter:
         return blocks
 
     def send(self, results: list[ProfitResult]) -> bool:
-        if not cfg.SLACK_BOT_TOKEN or not cfg.SLACK_CHANNEL_ID:
+        if not cfg.SLACK_BOT_TOKEN or not cfg.SLACK_CHANNEL:
             logger.warning("Slack 未設定のためレポートをスキップします（SLACK_BOT_TOKEN / SLACK_CHANNEL_ID）")
             return False
 
@@ -160,7 +160,7 @@ class SlackReporter:
 
     def send_error(self, message: str):
         """エラー通知を Slack に送る。"""
-        if not cfg.SLACK_BOT_TOKEN or not cfg.SLACK_CHANNEL_ID:
+        if not cfg.SLACK_BOT_TOKEN or not cfg.SLACK_CHANNEL:
             return
         try:
             self.client.chat_postMessage(

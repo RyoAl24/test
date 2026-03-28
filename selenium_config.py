@@ -11,19 +11,24 @@ MERCARI_EMAIL    = os.getenv("MERCARI_EMAIL", "")
 MERCARI_PASSWORD = os.getenv("MERCARI_PASSWORD", "")
 
 # ── Slack ────────────────────────────────────────────────
-SLACK_BOT_TOKEN  = os.getenv("SLACK_BOT_TOKEN", "")
-SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "")
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
+# SLACK_CHANNEL はチャンネル名（sedori）・ID（C0XXXXX）どちらでも可
+# 名前のみ（# なし）の場合は自動で # を付加する
+_raw_channel    = os.getenv("SLACK_CHANNEL", os.getenv("SLACK_CHANNEL_ID", ""))
+SLACK_CHANNEL   = (
+    f"#{_raw_channel}" if _raw_channel and not _raw_channel.startswith(("#", "C"))
+    else _raw_channel
+)
 
 # ── ビジネスロジック ──────────────────────────────────────
-MIN_PROFIT_RATE      = float(os.getenv("MIN_PROFIT_RATE",      "0.20"))
-PRICE_MULTIPLIER_MIN = float(os.getenv("PRICE_MULTIPLIER_MIN", "1.5"))
-PRICE_MULTIPLIER_MAX = float(os.getenv("PRICE_MULTIPLIER_MAX", "2.0"))
-MIN_SALES_COUNT      = int(os.getenv("MIN_SALES_COUNT",        "3"))
-DAYS_LOOKBACK        = int(os.getenv("DAYS_LOOKBACK",          "7"))
+MIN_PROFIT_RATE = float(os.getenv("MIN_PROFIT_RATE", "0.20"))  # 0.20 = 20%
+MIN_SALES_COUNT = int(os.getenv("MIN_SALES_COUNT",   "3"))
+DAYS_LOOKBACK   = int(os.getenv("DAYS_LOOKBACK",     "7"))
 
-# ── Amazon 手数料（利益計算用） ───────────────────────────
-AMAZON_FEE_RATE = 0.10   # 販売手数料 10%
-AMAZON_FBA_FEE  = 500    # FBA 手数料（円）
+# ── 利益計算（楽天仕入れ → Mercari 出品モデル） ───────────
+#   profit = sell_price - mercari_fee - shipping - buy_price
+MERCARI_FEE_RATE = float(os.getenv("MERCARI_FEE_RATE", "0.10"))  # 10%
+SHIPPING_FEE     = int(os.getenv("SHIPPING_FEE",       "600"))   # 円
 
 # ── Selenium ─────────────────────────────────────────────
 HEADLESS          = os.getenv("HEADLESS", "true").lower() == "true"
