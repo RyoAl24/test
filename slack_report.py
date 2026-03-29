@@ -11,7 +11,7 @@ from slack_sdk.errors import SlackApiError
 from loguru import logger
 
 import selenium_config as cfg
-from rakuten_api import ProfitResult
+from rakuten_selenium import ProfitResult
 
 
 class SlackReporter:
