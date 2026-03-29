@@ -72,14 +72,14 @@ class RakutenAPIClient:
             )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-    def _call(self, keyword: str, hits: int = 30) -> list[dict]:
-        """API を叩いて Items リストを返す。"""
+    def _call(self, keyword: str, hits: int = 30) -> tuple[int, list[dict]]:
+        """API を叩いて (hitCount, Items リスト) を返す。"""
         params: dict = {
             "applicationId": self._app_id,
             "keyword":        keyword,
             "hits":           hits,
-            "sort":           "+itemPrice",  # 価格昇順
-            "minPrice":       100,
+            "sort":           "-reviewCount",  # レビュー数降順（実績ある商品優先）
+            "minPrice":       500,             # 明らかに無関係な激安品を除外
             "format":         "json",
             "formatVersion":  2,
         }
@@ -94,43 +94,45 @@ class RakutenAPIClient:
                 f"楽天API 400: '{keyword[:30]}' "
                 f"→ {resp.json().get('error_description', '')}"
             )
-            return []
+            return 0, []
 
         resp.raise_for_status()
-        return resp.json().get("Items", [])
+        data = resp.json()
+        return data.get("count", 0), data.get("Items", [])
 
-    def get_cheapest(self, keyword: str) -> Optional[RakutenItem]:
+    def get_best(self, keyword: str) -> Optional[RakutenItem]:
         """
-        キーワードで楽天市場を検索し、最安値の RakutenItem を返す。
-        結果なし・エラー時は None を返す。
+        キーワードで楽天市場を検索し、レビュー数最多の RakutenItem を返す。
+        hitCount が 0 の場合・エラー時は None を返す。
         """
         try:
-            items = self._call(keyword)
+            hit_count, items = self._call(keyword)
         except Exception as e:
             logger.warning(f"楽天API 失敗 '{keyword[:30]}': {e}")
             return None
 
-        if not items:
-            logger.debug(f"楽天API: '{keyword[:30]}' → 結果なし")
+        # hitCount == 0 → 関連商品なし
+        if hit_count == 0 or not items:
+            logger.debug(f"楽天API: '{keyword[:30]}' → hitCount=0 スキップ")
             return None
 
-        cheapest = min(items, key=lambda x: x.get("itemPrice", 999_999_999))
-        price    = cheapest.get("itemPrice", 0)
+        top = items[0]  # -reviewCount ソート済みなので先頭が最多レビュー
+        price = top.get("itemPrice", 0)
         if price == 0:
             return None
 
-        images    = cheapest.get("mediumImageUrls") or []
+        images    = top.get("mediumImageUrls") or []
         image_url = images[0].get("imageUrl", "") if images else ""
 
         result = RakutenItem(
-            name      = cheapest.get("itemName", ""),
+            name      = top.get("itemName", ""),
             price     = price,
-            url       = cheapest.get("itemUrl", ""),
-            shop_name = cheapest.get("shopName", ""),
+            url       = top.get("itemUrl", ""),
+            shop_name = top.get("shopName", ""),
             image_url = image_url,
         )
         logger.debug(
-            f"楽天最安値: '{keyword[:20]}' "
+            f"楽天ベスト: '{keyword[:20]}' "
             f"→ ¥{price:,}  ({result.shop_name[:20] or '不明'})"
         )
         return result
@@ -154,8 +156,15 @@ class ProfitCalculator:
 
     def evaluate(self, item: SoldItem) -> Optional[ProfitResult]:
         """利益率 >= MIN_PROFIT_RATE なら ProfitResult を返す。"""
-        rakuten = self.client.get_cheapest(item.name[:50])
+        rakuten = self.client.get_best(item.name[:50])
         if not rakuten:
+            return None
+
+        # 楽天価格がメルカリ価格の 50% 未満 → キーワードがズレた別商品と判断してスキップ
+        if rakuten.price < item.price * 0.5:
+            logger.debug(
+                f"{item.name[:25]} | 楽天¥{rakuten.price:,} < メルカリ¥{item.price:,}×50% → スキップ"
+            )
             return None
 
         profit, profit_rate = self._calc(item.price, rakuten.price)
