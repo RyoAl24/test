@@ -1,14 +1,14 @@
 """
 楽天市場 価格検索モジュール（楽天ウェブサービス API 版）
-Selenium / スクレイピング不要。requests のみ使用。
+Selenium 不使用。requests のみ。
 
 API: IchibaItem/Search/20170706
-  https://webservice.rakuten.co.jp/documentation/ichiba-item-search
 """
 
+import re
 import time
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
@@ -19,16 +19,46 @@ import selenium_config as cfg
 from mercari_selenium import SoldItem
 
 
+# ── メルカリタイトルのクリーニング ─────────────────────────────────────────────
+
+_NOISE_PATTERNS = re.compile(
+    r"【[^】]*】|[\[（(][^)\]）]*[\]）)]"   # 【美品】 (送料込み) [即購入OK] など
+    r"|送料込み|送料無料|匿名配送|即購入OK|値下げ不可|値下げ交渉可"
+    r"|美品|超美品|極美品|新品未使用|新品未開封|未使用|中古|ジャンク"
+    r"|セット|まとめ売り|おまけ付き|限定|レア|入手困難|廃盤"
+    r"|♪|★|☆|◆|●|■|▲|※|!+|♡|❤"
+    r"|#\S+",
+    re.IGNORECASE,
+)
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def clean_title(title: str) -> str:
+    """メルカリ商品タイトルから装飾語・記号を除去して楽天検索キーワードにする。"""
+    cleaned = _NOISE_PATTERNS.sub(" ", title)
+    cleaned = _WHITESPACE.sub(" ", cleaned).strip()
+    # 短すぎたら元タイトルの先頭30文字を返す
+    return cleaned if len(cleaned) >= 3 else title[:30]
+
+
+def shorten_keyword(keyword: str) -> str:
+    """キーワードを短縮する（先頭3単語に絞る）。"""
+    words = keyword.split()
+    return " ".join(words[:3]) if len(words) > 3 else keyword[:20]
+
+
 # ── データクラス ───────────────────────────────────────────────────────────────
 
 @dataclass
 class RakutenItem:
     """楽天 API の検索結果 1件分"""
-    name:      str
-    price:     int
-    url:       str
-    shop_name: str
-    image_url: str
+    name:         str
+    price:        int
+    url:          str
+    shop_name:    str
+    image_url:    str
+    review_count: int = 0
 
 
 @dataclass
@@ -37,10 +67,9 @@ class ProfitResult:
     mercari_item:      SoldItem
     rakuten_item:      RakutenItem
     amazon_sell_price: int     # 出品予定価格（Mercari 実績売価）
-    profit:            int     # 利益額（円）
+    profit:            int     # 純利益額（手数料+送料控除後）
     profit_rate:       float   # 利益率 0.0〜1.0
 
-    # slack_report.py が参照するプロパティ（後方互換）
     @property
     def rakuten_name(self)      -> str:   return self.rakuten_item.name
     @property
@@ -51,6 +80,8 @@ class ProfitResult:
     def rakuten_url(self)       -> str:   return self.rakuten_item.url
     @property
     def rakuten_image_url(self) -> str:   return self.rakuten_item.image_url
+    @property
+    def rakuten_review_count(self) -> int: return self.rakuten_item.review_count
 
 
 # ── 楽天 API クライアント ──────────────────────────────────────────────────────
@@ -67,19 +98,17 @@ class RakutenAPIClient:
         self._session      = requests.Session()
 
         if not self._app_id:
-            raise ValueError(
-                "RAKUTEN_APP_ID が未設定です。.env を確認してください。"
-            )
+            raise ValueError("RAKUTEN_APP_ID が未設定です。.env を確認してください。")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     def _call(self, keyword: str, hits: int = 30) -> tuple[int, list[dict]]:
-        """API を叩いて (hitCount, Items リスト) を返す。"""
+        """API を叩いて (count, Items) を返す。"""
         params: dict = {
             "applicationId": self._app_id,
             "keyword":        keyword,
             "hits":           hits,
-            "sort":           "-reviewCount",  # レビュー数降順（実績ある商品優先）
-            "minPrice":       500,             # 明らかに無関係な激安品を除外
+            "sort":           "-reviewCount",  # レビュー数降順
+            "minPrice":       500,             # 500円以下の無関係商品を除外
             "format":         "json",
             "formatVersion":  2,
         }
@@ -88,7 +117,6 @@ class RakutenAPIClient:
 
         resp = self._session.get(self.ENDPOINT, params=params, timeout=10)
 
-        # 400 は無効キーワードなどの恒久エラー → リトライしない
         if resp.status_code == 400:
             logger.debug(
                 f"楽天API 400: '{keyword[:30]}' "
@@ -100,41 +128,56 @@ class RakutenAPIClient:
         data = resp.json()
         return data.get("count", 0), data.get("Items", [])
 
-    def get_best(self, keyword: str) -> Optional[RakutenItem]:
+    def _to_rakuten_item(self, raw: dict) -> Optional[RakutenItem]:
+        """API レスポンスの 1件を RakutenItem に変換する。"""
+        price = raw.get("itemPrice", 0)
+        if price == 0:
+            return None
+        images    = raw.get("mediumImageUrls") or []
+        image_url = images[0].get("imageUrl", "") if images else ""
+        return RakutenItem(
+            name         = raw.get("itemName", ""),
+            price        = price,
+            url          = raw.get("itemUrl", ""),
+            shop_name    = raw.get("shopName", ""),
+            image_url    = image_url,
+            review_count = raw.get("reviewCount", 0),
+        )
+
+    def search(self, keyword: str) -> Optional[RakutenItem]:
         """
-        キーワードで楽天市場を検索し、レビュー数最多の RakutenItem を返す。
-        hitCount が 0 の場合・エラー時は None を返す。
+        キーワードで楽天市場を検索し、レビュー最多商品を返す。
+        hitCount=0 なら短縮キーワードで再検索を 1回だけ試みる。
         """
+        # ── 1回目: クリーニング済みキーワードでそのまま検索 ──
         try:
-            hit_count, items = self._call(keyword)
+            count, items = self._call(keyword)
         except Exception as e:
             logger.warning(f"楽天API 失敗 '{keyword[:30]}': {e}")
             return None
 
-        # hitCount == 0 → 関連商品なし
-        if hit_count == 0 or not items:
-            logger.debug(f"楽天API: '{keyword[:30]}' → hitCount=0 スキップ")
-            return None
+        if count == 0 or not items:
+            # ── 2回目: 短縮キーワードで再検索 ──
+            short = shorten_keyword(keyword)
+            if short == keyword:
+                logger.debug(f"楽天API: '{keyword[:30]}' → hitCount=0 スキップ")
+                return None
+            logger.debug(f"楽天API: '{keyword[:25]}' hitCount=0 → 短縮再検索 '{short}'")
+            try:
+                count, items = self._call(short)
+            except Exception as e:
+                logger.warning(f"楽天API 再検索失敗 '{short}': {e}")
+                return None
+            if count == 0 or not items:
+                logger.debug(f"楽天API: '{short}' → 再検索も hitCount=0")
+                return None
 
-        top = items[0]  # -reviewCount ソート済みなので先頭が最多レビュー
-        price = top.get("itemPrice", 0)
-        if price == 0:
-            return None
-
-        images    = top.get("mediumImageUrls") or []
-        image_url = images[0].get("imageUrl", "") if images else ""
-
-        result = RakutenItem(
-            name      = top.get("itemName", ""),
-            price     = price,
-            url       = top.get("itemUrl", ""),
-            shop_name = top.get("shopName", ""),
-            image_url = image_url,
-        )
-        logger.debug(
-            f"楽天ベスト: '{keyword[:20]}' "
-            f"→ ¥{price:,}  ({result.shop_name[:20] or '不明'})"
-        )
+        result = self._to_rakuten_item(items[0])
+        if result:
+            logger.debug(
+                f"楽天: '{keyword[:20]}' → ¥{result.price:,} "
+                f"({result.shop_name[:15]}) レビュー{result.review_count}件"
+            )
         return result
 
 
@@ -144,10 +187,11 @@ class ProfitCalculator:
     def __init__(self):
         self.client = RakutenAPIClient()
 
-    def _calc(self, sell_price: int, buy_price: int) -> tuple[int, float]:
+    @staticmethod
+    def _calc(sell_price: int, buy_price: int) -> tuple[int, float]:
         """
-        profit      = sell_price - (sell_price × MERCARI_FEE_RATE) - SHIPPING_FEE - buy_price
-        profit_rate = profit / sell_price
+        純利益 = 売価 - メルカリ手数料(10%) - 送料(600) - 仕入れ価格
+        利益率 = 純利益 / 売価
         """
         fee         = int(sell_price * cfg.MERCARI_FEE_RATE)
         profit      = sell_price - fee - cfg.SHIPPING_FEE - buy_price
@@ -155,27 +199,42 @@ class ProfitCalculator:
         return profit, profit_rate
 
     def evaluate(self, item: SoldItem) -> Optional[ProfitResult]:
-        """利益率 >= MIN_PROFIT_RATE なら ProfitResult を返す。"""
-        rakuten = self.client.get_best(item.name[:50])
+        """利益率・純利益の両方が閾値を超えた場合のみ ProfitResult を返す。"""
+        # タイトルから装飾語を除去して検索キーワードにする
+        search_kw = clean_title(item.name)
+        rakuten   = self.client.search(search_kw)
         if not rakuten:
             return None
 
-        # 楽天価格がメルカリ価格の 50% 未満 → キーワードがズレた別商品と判断してスキップ
+        # ── 50% フィルタ: 楽天価格がメルカリの半額未満 → 別商品の可能性 ──
         if rakuten.price < item.price * 0.5:
             logger.debug(
-                f"{item.name[:25]} | 楽天¥{rakuten.price:,} < メルカリ¥{item.price:,}×50% → スキップ"
+                f"SKIP(50%): {item.name[:25]} | "
+                f"楽天¥{rakuten.price:,} < メルカリ¥{item.price:,}×50%"
             )
             return None
 
         profit, profit_rate = self._calc(item.price, rakuten.price)
 
-        logger.debug(
-            f"{item.name[:25]} | 仕入¥{rakuten.price:,} → "
-            f"出品¥{item.price:,} | 利益¥{profit:,} ({profit_rate:.1%})"
-        )
-
-        if profit_rate < cfg.MIN_PROFIT_RATE:
+        # ── 純利益額フィルタ: ¥500 未満は割に合わない ──
+        if profit < cfg.MIN_PROFIT_AMOUNT:
+            logger.debug(
+                f"SKIP(利益額): {item.name[:25]} | 純利益¥{profit:,} < ¥{cfg.MIN_PROFIT_AMOUNT:,}"
+            )
             return None
+
+        # ── 利益率フィルタ ──
+        if profit_rate < cfg.MIN_PROFIT_RATE:
+            logger.debug(
+                f"SKIP(利益率): {item.name[:25]} | {profit_rate:.1%} < {cfg.MIN_PROFIT_RATE:.0%}"
+            )
+            return None
+
+        logger.info(
+            f"HIT: {item.name[:25]} | 仕入¥{rakuten.price:,} → "
+            f"出品¥{item.price:,} | 純利益¥{profit:,} ({profit_rate:.1%}) "
+            f"レビュー{rakuten.review_count}件"
+        )
 
         return ProfitResult(
             mercari_item      = item,
@@ -192,11 +251,12 @@ class ProfitCalculator:
             r = self.evaluate(item)
             if r:
                 results.append(r)
-            time.sleep(random.uniform(1.0, 2.0))  # 楽天 API 推奨: 1秒以上
+            time.sleep(random.uniform(1.0, 2.0))
 
         results.sort(key=lambda x: x.profit, reverse=True)
         logger.info(
             f"利益対象: {len(results)} 件 / {len(items)} 件 "
-            f"（閾値 {cfg.MIN_PROFIT_RATE:.0%}）"
+            f"（利益率 >= {cfg.MIN_PROFIT_RATE:.0%}, "
+            f"純利益 >= ¥{cfg.MIN_PROFIT_AMOUNT:,}）"
         )
         return results

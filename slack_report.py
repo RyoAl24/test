@@ -1,6 +1,6 @@
 """
 Slack 日次レポート送信モジュール
-利益ランキング付きで毎朝 Block Kit 形式で送信する。
+利益ランキング・純利益額・レビュー数・メルカリURL 付き。
 """
 
 from datetime import datetime
@@ -17,9 +17,9 @@ from rakuten_selenium import ProfitResult
 class SlackReporter:
     def __init__(self):
         self.client  = WebClient(token=cfg.SLACK_BOT_TOKEN)
-        self.channel = cfg.SLACK_CHANNEL   # "sedori" / "#sedori" / "C0XXXXX" すべて可
+        self.channel = cfg.SLACK_CHANNEL
 
-    # ── ブロック生成ヘルパー ──────────────────────────────────────────────────
+    # ── ブロック生成 ──────────────────────────────────────────────────────────
 
     def _header_block(self, date_str: str) -> dict:
         return {
@@ -31,19 +31,17 @@ class SlackReporter:
         }
 
     def _summary_block(self, results: list[ProfitResult]) -> dict:
-        total_profit   = sum(r.profit for r in results)
-        avg_rate       = (
-            sum(r.profit_rate for r in results) / len(results) if results else 0
-        )
-        top_profit     = results[0].profit if results else 0
+        total_profit = sum(r.profit for r in results)
+        avg_rate     = sum(r.profit_rate for r in results) / len(results) if results else 0
+        top_profit   = results[0].profit if results else 0
 
         return {
             "type": "section",
             "fields": [
                 {"type": "mrkdwn", "text": f"*対象商品数*\n{len(results)} 件"},
-                {"type": "mrkdwn", "text": f"*推定合計利益*\n¥{total_profit:,}"},
+                {"type": "mrkdwn", "text": f"*推定合計純利益*\n¥{total_profit:,}"},
                 {"type": "mrkdwn", "text": f"*平均利益率*\n{avg_rate:.1%}"},
-                {"type": "mrkdwn", "text": f"*最高利益（1件）*\n¥{top_profit:,}"},
+                {"type": "mrkdwn", "text": f"*最高純利益（1件）*\n¥{top_profit:,}"},
             ],
         }
 
@@ -51,14 +49,25 @@ class SlackReporter:
         medal = {1: ":first_place_medal:", 2: ":second_place_medal:", 3: ":third_place_medal:"}.get(rank, f"*{rank}.*")
         rate_bar = self._rate_bar(r.profit_rate)
 
+        # メルカリ商品 URL（取れていれば表示）
+        mercari_link = (
+            f"<{r.mercari_item.item_url}|メルカリで見る>"
+            if r.mercari_item.item_url
+            else "URL なし"
+        )
+
         text = (
             f"{medal}  *{r.mercari_item.name[:40]}*\n"
             f"  :label: キーワード: `{r.mercari_item.keyword}`　"
             f"メルカリ売れ数: *{r.mercari_item.sold_count} 件 / {cfg.DAYS_LOOKBACK}日*\n"
+            f"  :link: {mercari_link}\n"
             f"  :shopping_trolley: 楽天仕入: *¥{r.rakuten_price:,}*  "
-            f"（{r.rakuten_shop[:25] or '不明'}）\n"
-            f"  :amazon: Amazon 出品予定: *¥{r.amazon_sell_price:,}*\n"
-            f"  :moneybag: 利益: *¥{r.profit:,}*  {rate_bar}  `{r.profit_rate:.1%}`"
+            f"（{r.rakuten_shop[:25] or '不明'}）"
+            f"　:star: レビュー *{r.rakuten_review_count}* 件\n"
+            f"  :package: メルカリ出品: *¥{r.amazon_sell_price:,}*\n"
+            f"  :moneybag: *純利益: ¥{r.profit:,}*  "
+            f"（手数料{cfg.MERCARI_FEE_RATE:.0%} + 送料¥{cfg.SHIPPING_FEE:,} 控除後）\n"
+            f"  :chart_with_upwards_trend: 利益率: {rate_bar}  `{r.profit_rate:.1%}`"
         )
 
         block: dict = {
@@ -66,7 +75,6 @@ class SlackReporter:
             "text": {"type": "mrkdwn", "text": text},
         }
 
-        # 楽天リンクボタン（URL がある場合）
         if r.rakuten_url:
             block["accessory"] = {
                 "type": "button",
@@ -79,8 +87,7 @@ class SlackReporter:
 
     @staticmethod
     def _rate_bar(rate: float) -> str:
-        """利益率を絵文字バーで可視化（0%〜50%）"""
-        filled = min(int(rate / 0.05), 10)  # 5% = 1マス、最大 10マス
+        filled = min(int(rate / 0.05), 10)
         return ":green_square:" * filled + ":white_square_button:" * (10 - filled)
 
     def _footer_block(self) -> dict:
@@ -91,8 +98,9 @@ class SlackReporter:
                     "type": "mrkdwn",
                     "text": (
                         f"自動生成 by セドリBot  |  "
-                        f"最低利益率フィルタ: {cfg.MIN_PROFIT_RATE:.0%}  |  "
-                        f"直近 {cfg.DAYS_LOOKBACK} 日間  {cfg.MIN_SALES_COUNT} 件以上売れた商品"
+                        f"利益率 >= {cfg.MIN_PROFIT_RATE:.0%}  |  "
+                        f"純利益 >= ¥{cfg.MIN_PROFIT_AMOUNT:,}  |  "
+                        f"直近 {cfg.DAYS_LOOKBACK} 日 / {cfg.MIN_SALES_COUNT} 件以上"
                     ),
                 }
             ],
@@ -137,14 +145,11 @@ class SlackReporter:
 
     def send(self, results: list[ProfitResult]) -> bool:
         if not cfg.SLACK_BOT_TOKEN or not cfg.SLACK_CHANNEL:
-            logger.warning("Slack 未設定のためレポートをスキップします（SLACK_BOT_TOKEN / SLACK_CHANNEL_ID）")
+            logger.warning("Slack 未設定のためレポートをスキップします")
             return False
 
         total = sum(r.profit for r in results)
-        fallback = (
-            f"セドリ日次レポート: {len(results)} 件の利益商品、"
-            f"推定合計利益 ¥{total:,}"
-        )
+        fallback = f"セドリ日次レポート: {len(results)} 件、推定純利益 ¥{total:,}"
 
         try:
             self.client.chat_postMessage(
@@ -159,7 +164,6 @@ class SlackReporter:
             return False
 
     def send_error(self, message: str):
-        """エラー通知を Slack に送る。"""
         if not cfg.SLACK_BOT_TOKEN or not cfg.SLACK_CHANNEL:
             return
         try:
@@ -171,21 +175,26 @@ class SlackReporter:
             pass
 
     def print_report(self, results: list[ProfitResult]):
-        """Slack が未設定のときにターミナルへ出力する。"""
-        print("\n" + "=" * 70)
+        """ターミナルへの出力（Slack 未設定 or ドライラン時）"""
+        print("\n" + "=" * 80)
         print(f"  セドリ日次レポート  {datetime.now().strftime('%Y-%m-%d')}")
-        print("=" * 70)
+        print("=" * 80)
         if not results:
             print("  利益対象商品なし")
         else:
             total = sum(r.profit for r in results)
-            print(f"  対象: {len(results)} 件  |  推定合計利益: ¥{total:,}")
-            print("-" * 70)
+            print(f"  対象: {len(results)} 件  |  推定合計純利益: ¥{total:,}")
+            print(f"  フィルタ: 利益率 >= {cfg.MIN_PROFIT_RATE:.0%}, "
+                  f"純利益 >= ¥{cfg.MIN_PROFIT_AMOUNT:,}")
+            print("-" * 80)
             for i, r in enumerate(results, 1):
                 print(
-                    f"  {i:2}. {r.mercari_item.name[:35]:<35} "
+                    f"  {i:2}. {r.mercari_item.name[:30]:<30} "
                     f"仕入¥{r.rakuten_price:>7,}  "
                     f"→ 出品¥{r.amazon_sell_price:>7,}  "
-                    f"利益¥{r.profit:>6,}  ({r.profit_rate:.1%})"
+                    f"純利益¥{r.profit:>6,}  ({r.profit_rate:.1%})  "
+                    f"レビュー{r.rakuten_review_count:>4}件"
                 )
-        print("=" * 70 + "\n")
+                if r.mercari_item.item_url:
+                    print(f"      {r.mercari_item.item_url}")
+        print("=" * 80 + "\n")

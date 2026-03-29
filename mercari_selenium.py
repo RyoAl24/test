@@ -62,7 +62,7 @@ class MercariSeleniumScraper:
     LOGIN_URL       = "https://jp.mercari.com/login"
     SEARCH_URL      = "https://jp.mercari.com/search"
 
-    # 売り切れフィルター
+    # 売り切れフィルター（実際に売れた実績価格を使うため sold_out 限定）
     STATUS_SOLD_OUT = "sold_out"
 
     def __init__(self):

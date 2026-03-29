@@ -25,12 +25,13 @@ SLACK_CHANNEL   = (
 )
 
 # ── ビジネスロジック ──────────────────────────────────────
-MIN_PROFIT_RATE = float(os.getenv("MIN_PROFIT_RATE", "0.20"))  # 0.20 = 20%
-MIN_SALES_COUNT = int(os.getenv("MIN_SALES_COUNT",   "3"))
-DAYS_LOOKBACK   = int(os.getenv("DAYS_LOOKBACK",     "7"))
+MIN_PROFIT_RATE   = float(os.getenv("MIN_PROFIT_RATE",   "0.20"))  # 0.20 = 20%
+MIN_PROFIT_AMOUNT = int(os.getenv("MIN_PROFIT_AMOUNT",   "500"))   # 最低純利益 500円
+MIN_SALES_COUNT   = int(os.getenv("MIN_SALES_COUNT",     "3"))
+DAYS_LOOKBACK     = int(os.getenv("DAYS_LOOKBACK",       "7"))
 
 # ── 利益計算（楽天仕入れ → Mercari 出品モデル） ───────────
-#   profit = sell_price - mercari_fee - shipping - buy_price
+#   純利益 = 売価 - メルカリ手数料 - 送料 - 仕入れ価格
 MERCARI_FEE_RATE = float(os.getenv("MERCARI_FEE_RATE", "0.10"))  # 10%
 SHIPPING_FEE     = int(os.getenv("SHIPPING_FEE",       "600"))   # 円
 
@@ -45,12 +46,15 @@ MERCARI_COOKIE_FILE = "mercari_cookies.json"
 # ── スケジュール ──────────────────────────────────────────
 DAILY_RUN_TIME = os.getenv("DAILY_RUN_TIME", "06:00")
 
-# ── 検索キーワード（30種類） ──────────────────────────────
-SEARCH_KEYWORDS = [
-    "DVD廃盤",        "Blu-ray初回限定",  "ゲームボーイ",     "ニンテンドー64",   "ゲームソフトレトロ",
-    "推し活グッズ",    "アイドルグッズ",   "ビンテージスピーカー", "アンプ",          "プロジェクター",
-    "オーディオ機器",  "ビンテージラジオ", "ヘッドフォン",     "イヤホン",         "Nikonカメラ",
-    "Canonカメラ",    "Sonyカメラ",       "レンズ",           "電動工具",         "ドリル",
-    "掘削機",         "懐中電灯",         "照明",             "ルーター",         "ネットワーク機器",
-    "キーボード",     "マウス",           "バッテリー",        "充電器",           "モバイルバッテリー",
-]
+# ── 検索キーワード ──────────────────────────────────────
+# .env の SEARCH_KEYWORDS をカンマ区切りで上書き可能
+_env_keywords = os.getenv("SEARCH_KEYWORDS", "")
+SEARCH_KEYWORDS = (
+    [k.strip() for k in _env_keywords.split(",") if k.strip()]
+    if _env_keywords
+    else [
+        "Nintendo Switch", "PS5", "AirPods", "iPhone", "iPad",
+        "LEGO", "トレーディングカード", "ポケモンカード", "遊戯王",
+        "コスメ", "香水", "ブランド財布", "スニーカー", "カメラ", "レンズ",
+    ]
+)
