@@ -10,6 +10,10 @@ load_dotenv()
 MERCARI_EMAIL    = os.getenv("MERCARI_EMAIL", "")
 MERCARI_PASSWORD = os.getenv("MERCARI_PASSWORD", "")
 
+# ── 楽天ウェブサービス API ────────────────────────────────
+RAKUTEN_APP_ID       = os.getenv("RAKUTEN_APP_ID", "")
+RAKUTEN_AFFILIATE_ID = os.getenv("RAKUTEN_AFFILIATE_ID", "")
+
 # ── Slack ────────────────────────────────────────────────
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 # SLACK_CHANNEL はチャンネル名（sedori）・ID（C0XXXXX）どちらでも可

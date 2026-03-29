@@ -22,7 +22,7 @@ from loguru import logger
 
 import selenium_config as cfg
 from mercari_selenium import MercariSeleniumScraper
-from rakuten_selenium import ProfitCalculator
+from rakuten_api import ProfitCalculator
 from slack_report import SlackReporter
 
 
