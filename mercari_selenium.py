@@ -343,19 +343,25 @@ class MercariSeleniumScraper:
         logger.info(f"Mercari スクレイピング: '{keyword}'")
         raw_items: list[dict] = []
 
-        # ── ページ 1 を取得してページ数を確認 ──
+        # メルカリは 1 ページ約 30 件。MAX_ITEMS_PER_KEYWORD から必要ページ数を計算
+        items_per_page = 30
+        max_pages = max(1, math.ceil(cfg.MAX_ITEMS_PER_KEYWORD / items_per_page))
+
+        # ── ページ 1 を取得 ──
         soup1 = self._fetch_search_page(keyword, 1)
         raw_items.extend(self._parse_items(soup1, keyword))
-        total_pages = self._count_pages(soup1)
+        available_pages = min(self._count_pages(soup1), max_pages)
 
         # ── 2 ページ目以降 ──
-        for page in range(2, total_pages + 1):
+        for page in range(2, available_pages + 1):
+            if len(raw_items) >= cfg.MAX_ITEMS_PER_KEYWORD:
+                break
             soup = self._fetch_search_page(keyword, page)
             raw_items.extend(self._parse_items(soup, keyword))
             time.sleep(random.uniform(1.5, 3.0))
 
         if not raw_items:
-            logger.debug(f"'{keyword}': 結果なし")
+            logger.info(f"  '{keyword}': HTML取得 0件 → スキップ")
             return []
 
         # ── 商品名で集計（先頭 20 文字で正規化） ──
@@ -364,13 +370,13 @@ class MercariSeleniumScraper:
             key = item["name"][:20].lower()
             groups[key].append(item)
 
+        skipped_by_count = 0
         results: list[SoldItem] = []
         for key, group in groups.items():
             if len(group) < cfg.MIN_SALES_COUNT:
+                skipped_by_count += len(group)
                 continue
-            # グループの代表（最初の 1件）を使用
             rep = group[0]
-            # 価格はグループ内の中央値を使う（外れ値に強い）
             prices = sorted(g["price"] for g in group if g["price"] > 0)
             median_price = prices[len(prices) // 2] if prices else 0
             if median_price == 0:
@@ -388,7 +394,12 @@ class MercariSeleniumScraper:
                 )
             )
 
-        logger.info(f"'{keyword}': {len(results)} 件（閾値 {cfg.MIN_SALES_COUNT} 件以上）")
+        logger.info(
+            f"  '{keyword}': HTML取得 {len(raw_items)}件 → "
+            f"グループ {len(groups)}種 → "
+            f"{cfg.MIN_SALES_COUNT}件以上売れ: {len(results)}件 "
+            f"（{skipped_by_count}件は売れ数不足で除外）"
+        )
         return results
 
     def scrape_all(self) -> list[SoldItem]:

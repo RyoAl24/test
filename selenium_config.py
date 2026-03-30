@@ -28,7 +28,8 @@ SLACK_CHANNEL   = (
 MIN_PROFIT_RATE   = float(os.getenv("MIN_PROFIT_RATE",   "0.20"))  # 0.20 = 20%
 MIN_PROFIT_AMOUNT = int(os.getenv("MIN_PROFIT_AMOUNT",   "500"))   # 最低純利益 500円
 MIN_SALES_COUNT   = int(os.getenv("MIN_SALES_COUNT",     "3"))
-DAYS_LOOKBACK     = int(os.getenv("DAYS_LOOKBACK",       "7"))
+DAYS_LOOKBACK         = int(os.getenv("DAYS_LOOKBACK",         "7"))
+MAX_ITEMS_PER_KEYWORD = int(os.getenv("MAX_ITEMS_PER_KEYWORD", "30"))  # キーワードあたり最大取得件数
 
 # ── 利益計算（楽天仕入れ → Mercari 出品モデル） ───────────
 #   純利益 = 売価 - メルカリ手数料 - 送料 - 仕入れ価格

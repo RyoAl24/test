@@ -67,9 +67,9 @@ def run_pipeline(dry_run: bool = False):
 
     try:
         # ── Step 1: Mercari スクレイピング ───────────────────────────────
-        logger.info("[1/3]  Mercari スクレイピング開始")
+        logger.info(f"[1/3]  Mercari スクレイピング開始（{len(cfg.SEARCH_KEYWORDS)} キーワード, 各最大 {cfg.MAX_ITEMS_PER_KEYWORD} 件）")
         sold_items = scraper.scrape_all()
-        logger.info(f"       {len(sold_items)} 件の売れ筋商品を取得")
+        logger.info(f"       Mercari 合計: {len(sold_items)} 件の売れ筋商品")
 
         if not sold_items:
             logger.warning("       売れ筋商品がゼロです。終了します。")
@@ -78,12 +78,10 @@ def run_pipeline(dry_run: bool = False):
             return
 
         # ── Step 2: 楽天価格確認 + 利益フィルタ ─────────────────────────
-        logger.info(f"[2/3]  楽天 価格確認 ({len(sold_items)} 件)")
-        calculator  = ProfitCalculator()
+        logger.info(f"[2/3]  楽天 API 価格確認（{len(sold_items)} 件）")
+        calculator   = ProfitCalculator()
         profit_items = calculator.filter_all(sold_items)
-        logger.info(
-            f"       {len(profit_items)} 件が利益率 {cfg.MIN_PROFIT_RATE:.0%} 以上"
-        )
+        logger.info(f"       最終通過: {len(profit_items)} 件")
 
         # ── Step 3: Slack レポート送信 ───────────────────────────────────
         logger.info("[3/3]  レポート送信")

@@ -245,18 +245,72 @@ class ProfitCalculator:
         )
 
     def filter_all(self, items: list[SoldItem]) -> list[ProfitResult]:
-        """全商品を評価して利益対象のみ返す。"""
+        """全商品を評価して利益対象のみ返す。フィルタ別の落ち件数をログに出力。"""
         results: list[ProfitResult] = []
+        skip_no_rakuten = 0   # 楽天ヒットなし
+        skip_50pct      = 0   # 50% フィルタ
+        skip_amount     = 0   # 純利益額不足
+        skip_rate       = 0   # 利益率不足
+
         for item in items:
-            r = self.evaluate(item)
-            if r:
-                results.append(r)
+            search_kw = clean_title(item.name)
+            rakuten   = self.client.search(search_kw)
+
+            if not rakuten:
+                skip_no_rakuten += 1
+                time.sleep(random.uniform(1.0, 2.0))
+                continue
+
+            if rakuten.price < item.price * 0.5:
+                skip_50pct += 1
+                logger.debug(
+                    f"SKIP(50%): {item.name[:25]} | "
+                    f"楽天¥{rakuten.price:,} < メルカリ¥{item.price:,}×50%"
+                )
+                time.sleep(random.uniform(1.0, 2.0))
+                continue
+
+            profit, profit_rate = self._calc(item.price, rakuten.price)
+
+            if profit < cfg.MIN_PROFIT_AMOUNT:
+                skip_amount += 1
+                logger.debug(
+                    f"SKIP(利益額): {item.name[:25]} | 純利益¥{profit:,}"
+                )
+                time.sleep(random.uniform(1.0, 2.0))
+                continue
+
+            if profit_rate < cfg.MIN_PROFIT_RATE:
+                skip_rate += 1
+                logger.debug(
+                    f"SKIP(利益率): {item.name[:25]} | {profit_rate:.1%}"
+                )
+                time.sleep(random.uniform(1.0, 2.0))
+                continue
+
+            logger.info(
+                f"HIT: {item.name[:25]} | 仕入¥{rakuten.price:,} → "
+                f"出品¥{item.price:,} | 純利益¥{profit:,} ({profit_rate:.1%}) "
+                f"レビュー{rakuten.review_count}件"
+            )
+            results.append(ProfitResult(
+                mercari_item      = item,
+                rakuten_item      = rakuten,
+                amazon_sell_price = item.price,
+                profit            = profit,
+                profit_rate       = profit_rate,
+            ))
             time.sleep(random.uniform(1.0, 2.0))
 
         results.sort(key=lambda x: x.profit, reverse=True)
-        logger.info(
-            f"利益対象: {len(results)} 件 / {len(items)} 件 "
-            f"（利益率 >= {cfg.MIN_PROFIT_RATE:.0%}, "
-            f"純利益 >= ¥{cfg.MIN_PROFIT_AMOUNT:,}）"
-        )
+        matched = len(items) - skip_no_rakuten
+
+        logger.info("── フィルタ集計 ──")
+        logger.info(f"  メルカリ入力:     {len(items)} 件")
+        logger.info(f"  楽天マッチ:       {matched} 件  （楽天ヒットなし: {skip_no_rakuten} 件）")
+        logger.info(f"  50%価格フィルタ:  -{skip_50pct} 件")
+        logger.info(f"  純利益額フィルタ: -{skip_amount} 件  （< ¥{cfg.MIN_PROFIT_AMOUNT:,}）")
+        logger.info(f"  利益率フィルタ:   -{skip_rate} 件  （< {cfg.MIN_PROFIT_RATE:.0%}）")
+        logger.info(f"  → 最終通過:       {len(results)} 件")
+
         return results
