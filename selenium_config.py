@@ -27,9 +27,13 @@ SLACK_CHANNEL   = (
 # ── ビジネスロジック ──────────────────────────────────────
 MIN_PROFIT_RATE   = float(os.getenv("MIN_PROFIT_RATE",   "0.20"))  # 0.20 = 20%
 MIN_PROFIT_AMOUNT = int(os.getenv("MIN_PROFIT_AMOUNT",   "500"))   # 最低純利益 500円
-MIN_SALES_COUNT   = int(os.getenv("MIN_SALES_COUNT",     "3"))
+# sold_out検索は各出品タイトルがユニークなため1件グループが多い → デフォルト1
+MIN_SALES_COUNT   = int(os.getenv("MIN_SALES_COUNT",     "1"))
 DAYS_LOOKBACK         = int(os.getenv("DAYS_LOOKBACK",         "7"))
 MAX_ITEMS_PER_KEYWORD = int(os.getenv("MAX_ITEMS_PER_KEYWORD", "30"))  # キーワードあたり最大取得件数
+
+# Mercari 検索ステータス: sold_out=売り切れ(実売価格確認用) / on_sale=販売中(出品中商品)
+MERCARI_STATUS = os.getenv("MERCARI_STATUS", "sold_out")
 
 # ── 利益計算（楽天仕入れ → Mercari 出品モデル） ───────────
 #   純利益 = 売価 - メルカリ手数料 - 送料 - 仕入れ価格

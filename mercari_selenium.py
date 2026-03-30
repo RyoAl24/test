@@ -64,6 +64,8 @@ class MercariSeleniumScraper:
 
     # 売り切れフィルター（実際に売れた実績価格を使うため sold_out 限定）
     STATUS_SOLD_OUT = "sold_out"
+    # 設定値から読み込み（sold_out / on_sale を env で切替可能）
+    STATUS = cfg.MERCARI_STATUS
 
     def __init__(self):
         self.driver = build_driver()
@@ -190,7 +192,7 @@ class MercariSeleniumScraper:
         return (
             f"{self.SEARCH_URL}"
             f"?keyword={quote(keyword)}"
-            f"&status={self.STATUS_SOLD_OUT}"
+            f"&status={self.STATUS}"
             f"&sort=created_time"
             f"&order=desc"
             f"&page={page}"
@@ -231,7 +233,14 @@ class MercariSeleniumScraper:
                 break
 
         if not cards:
-            logger.debug("商品カードが見つかりませんでした（ページが空か構造が変更された可能性）")
+            logger.warning(
+                f"商品カードが見つかりませんでした（ページが空か構造が変更された可能性）"
+                f" URL: {self.driver.current_url[:80] if hasattr(self, 'driver') else 'N/A'}"
+            )
+            # HTML断片をデバッグ出力（最初の500文字）
+            body = soup.find("body")
+            snippet = body.get_text(separator=" ", strip=True)[:200] if body else "(no body)"
+            logger.debug(f"  ページ内容(先頭200文字): {snippet}")
             return []
 
         cutoff = datetime.now() - timedelta(days=cfg.DAYS_LOOKBACK)
@@ -370,11 +379,24 @@ class MercariSeleniumScraper:
             key = item["name"][:20].lower()
             groups[key].append(item)
 
+        # グループサイズ分布をログに出す（デバッグ用）
+        size_dist: dict[int, int] = {}
+        for g in groups.values():
+            s = len(g)
+            size_dist[s] = size_dist.get(s, 0) + 1
+        logger.debug(
+            f"  '{keyword}': グループサイズ分布 {dict(sorted(size_dist.items()))} "
+            f"(MIN_SALES_COUNT={cfg.MIN_SALES_COUNT})"
+        )
+
         skipped_by_count = 0
         results: list[SoldItem] = []
         for key, group in groups.items():
             if len(group) < cfg.MIN_SALES_COUNT:
                 skipped_by_count += len(group)
+                logger.debug(
+                    f"  '{keyword}' SKIP(販売数不足): '{group[0]['name'][:30]}' → {len(group)}件 < {cfg.MIN_SALES_COUNT}"
+                )
                 continue
             rep = group[0]
             prices = sorted(g["price"] for g in group if g["price"] > 0)
@@ -395,10 +417,10 @@ class MercariSeleniumScraper:
             )
 
         logger.info(
-            f"  '{keyword}': HTML取得 {len(raw_items)}件 → "
+            f"  '{keyword}' [{self.STATUS}]: HTML取得 {len(raw_items)}件 → "
             f"グループ {len(groups)}種 → "
-            f"{cfg.MIN_SALES_COUNT}件以上売れ: {len(results)}件 "
-            f"（{skipped_by_count}件は売れ数不足で除外）"
+            f"{cfg.MIN_SALES_COUNT}件以上: {len(results)}件 "
+            f"（除外 {skipped_by_count}件）"
         )
         return results
 

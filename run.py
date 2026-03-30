@@ -28,15 +28,17 @@ from slack_report import SlackReporter
 
 # ── ログ設定 ─────────────────────────────────────────────────────────────────
 
-def _setup_logger():
+def _setup_logger(verbose: bool = False):
     logger.remove()
+    # --verbose/-v 指定時は標準出力にも DEBUG レベルで出す
+    stdout_level = "DEBUG" if verbose else "INFO"
     logger.add(
         sys.stdout,
         format=(
             "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
             "<level>{level:<8}</level> | {message}"
         ),
-        level="INFO",
+        level=stdout_level,
     )
     os.makedirs("logs", exist_ok=True)
     logger.add(
@@ -108,15 +110,17 @@ def run_pipeline(dry_run: bool = False):
 # ── エントリーポイント ────────────────────────────────────────────────────────
 
 def main():
-    _setup_logger()
-
     args = sys.argv[1:]
     run_now = "--now" in args or "-n" in args
     dry_run = "--dry" in args or "-d" in args
+    verbose = "--verbose" in args or "-v" in args
+
+    _setup_logger(verbose=verbose)
 
     if run_now:
         logger.info("即時実行モード")
         run_pipeline(dry_run=dry_run)
+        return
     else:
         run_time = cfg.DAILY_RUN_TIME
         logger.info(f"スケジューラ起動  毎日 {run_time} に実行（Ctrl+C で停止）")
